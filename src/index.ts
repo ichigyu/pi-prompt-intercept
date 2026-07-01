@@ -27,6 +27,9 @@ type RuntimeState = {
   port: number;
   host: string;
   timeoutMs: number;
+  startedAt: number;
+  providerRequestCount: number;
+  lastProviderRequestAt?: number;
   server?: Server;
   serverUrl?: string;
   requests: Map<string, PendingRequest>;
@@ -38,6 +41,8 @@ const state: RuntimeState = {
   port: readIntEnv("PI_PROMPT_INTERCEPT_PORT", 47831),
   host: process.env.PI_PROMPT_INTERCEPT_HOST || "127.0.0.1",
   timeoutMs: readIntEnv("PI_PROMPT_INTERCEPT_TIMEOUT_MS", 10 * 60 * 1000),
+  startedAt: Date.now(),
+  providerRequestCount: 0,
   requests: new Map(),
 };
 
@@ -140,6 +145,9 @@ async function route(req: IncomingMessage, res: ServerResponse) {
       interceptOnce: state.interceptOnce,
       mode: modeLabel(),
       serverUrl: state.serverUrl,
+      startedAt: state.startedAt,
+      providerRequestCount: state.providerRequestCount,
+      lastProviderRequestAt: state.lastProviderRequestAt,
       pending: [...state.requests.values()].filter((r) => r.status === "pending").map(metadataFor),
       recent: [...state.requests.values()].slice(-50).reverse().map(metadataFor),
     });
@@ -326,7 +334,7 @@ footer { border-top: 1px solid var(--line); padding: 10px 16px; background: var(
 </head>
 <body>
 <aside>
-  <div class="brand"><h1>pi-prompt-intercept</h1><div class="status-line" id="enabled"></div><div class="status-line">Local intercept UI for pi provider payloads.</div></div>
+  <div class="brand"><h1>pi-prompt-intercept</h1><div class="status-line" id="enabled"></div><div class="status-line" id="diagnostics">Local intercept UI for pi provider payloads.</div></div>
   <div class="controls"><button id="toggle"></button><button id="once">Intercept Once</button><button id="refresh">Refresh</button></div>
   <div id="list"></div>
 </aside>
@@ -368,6 +376,7 @@ const title = document.getElementById('title');
 const subtitle = document.getElementById('subtitle');
 const message = document.getElementById('message');
 const enabled = document.getElementById('enabled');
+const diagnostics = document.getElementById('diagnostics');
 const toggle = document.getElementById('toggle');
 const once = document.getElementById('once');
 const refreshBtn = document.getElementById('refresh');
@@ -531,6 +540,10 @@ function renderReadable(req) {
 function renderList() {
   const items = [...(state?.pending || []), ...(state?.recent || []).filter(r => !(state?.pending || []).some(p => p.id === r.id))];
   listEl.innerHTML = '';
+  if (!items.length) {
+    listEl.innerHTML = '<div class="empty">No provider requests captured yet.<br><br>Check that pi was started with this extension loaded, then send a prompt that reaches the model. If installed as a package after a git push, run pi update or reload the extension.</div>';
+    return;
+  }
   for (const item of items) {
     const div = document.createElement('div');
     div.className = 'item ' + item.status + (item.id === currentId ? ' active' : '');
@@ -543,6 +556,7 @@ async function refresh() {
   state = await api('/api/state');
   enabled.textContent = 'Mode: ' + (state.mode || (state.enabled ? 'on' : 'off'));
   enabled.className = 'status-line ' + (state.enabled ? 'good' : 'bad');
+  diagnostics.textContent = 'Requests seen: ' + (state.providerRequestCount || 0) + ' / started ' + (state.startedAt ? new Date(state.startedAt).toLocaleTimeString() : 'unknown') + (state.lastProviderRequestAt ? ' / last ' + new Date(state.lastProviderRequestAt).toLocaleTimeString() : '');
   toggle.textContent = state.enabled ? 'Disable' : 'Enable';
   once.disabled = state.mode === 'once';
   renderList();
@@ -617,7 +631,19 @@ export default function promptIntercept(pi: ExtensionAPI) {
     },
   });
 
+  pi.on("session_start", async (_event, ctx) => {
+    try {
+      const serverUrl = await ensureServer(ctx);
+      ctx.ui.setStatus("prompt-intercept", `intercept: ${modeLabel()} ${serverUrl}`);
+    } catch (error) {
+      ctx.ui.notify(`Prompt intercept failed to start: ${error instanceof Error ? error.message : String(error)}`, "error");
+    }
+  });
+
   pi.on("before_provider_request", async (event, ctx) => {
+    state.providerRequestCount += 1;
+    state.lastProviderRequestAt = Date.now();
+
     if (!state.enabled) return;
 
     const serverUrl = await ensureServer(ctx);
@@ -647,7 +673,7 @@ export default function promptIntercept(pi: ExtensionAPI) {
     throw new Error(decision.reason || "Provider request dropped by pi-prompt-intercept");
   });
 
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (_event, ctx) => {
     for (const req of state.requests.values()) {
       if (req.status === "pending") settle(req.id, { action: "drop", reason: "Session shutting down" });
     }
@@ -656,5 +682,6 @@ export default function promptIntercept(pi: ExtensionAPI) {
       state.server = undefined;
       state.serverUrl = undefined;
     }
+    ctx.ui.setStatus("prompt-intercept", undefined);
   });
 }
