@@ -9,6 +9,7 @@ This is a research/debugging tool for understanding what your agent is about to 
 - Hooks pi's `before_provider_request` extension event.
 - Starts a local web UI at `http://127.0.0.1:47831`.
 - Queues each provider request as `pending`.
+- Renders provider payloads in human-readable tabs: Overview, System, Messages, Tools, Raw/Edit, and JSON Tree.
 - Lets you inspect, edit, forward, or drop the payload.
 - Writes minimal audit events to `.pi/prompt-intercept/events.jsonl`.
 
@@ -40,7 +41,16 @@ For local project auto-discovery, copy or symlink the extension into `.pi/extens
 http://127.0.0.1:47831
 ```
 
-4. Choose one action:
+4. Inspect the payload through the readable tabs:
+
+- **Overview**: model, message/tool counts, approximate token estimate, scalar request parameters, and system prompt preview.
+- **System**: extracted system/developer/instructions text.
+- **Messages**: normalized conversation messages and tool call/result blocks.
+- **Tools**: tool schemas with names, descriptions, and parameters.
+- **Raw / Edit**: editable raw JSON payload.
+- **JSON Tree**: structured payload tree.
+
+5. Choose one action:
 
 - **Forward**: send the original provider payload.
 - **Forward Edited**: parse the editor JSON and send the edited payload.
