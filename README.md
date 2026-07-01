@@ -11,6 +11,7 @@ This is a research/debugging tool for understanding what your agent is about to 
 - Queues each provider request as `pending`.
 - Renders provider payloads in human-readable tabs: Overview, System, Messages, Tools, Raw/Edit, and JSON Tree.
 - Lets you inspect, edit, forward, or drop the payload.
+- Supports `on`, `off`, and `once` modes so you can intercept every request, no requests, or only the next request.
 - Writes minimal audit events to `.pi/prompt-intercept/events.jsonl`.
 
 It does not proxy arbitrary network traffic. It only intercepts provider payloads inside pi's extension lifecycle.
@@ -56,20 +57,35 @@ http://127.0.0.1:47831
 - **Forward Edited**: parse the editor JSON and send the edited payload.
 - **Drop**: abort the provider request.
 - **Disable**: stop intercepting new requests for this session.
+- **Intercept Once**: intercept only the next provider request, then automatically switch back to off.
 
 ## Environment Variables
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PI_PROMPT_INTERCEPT` | enabled | Set `0` to disable interception. |
+| `PI_PROMPT_INTERCEPT_ONCE` | disabled | Set `1` to start in once mode. |
 | `PI_PROMPT_INTERCEPT_HOST` | `127.0.0.1` | Bind host for the local UI. Keep this local unless you know what you are doing. |
 | `PI_PROMPT_INTERCEPT_PORT` | `47831` | Port for the local UI. |
 | `PI_PROMPT_INTERCEPT_TIMEOUT_MS` | `600000` | Auto-forward original payload after timeout. Set `0` to wait forever. |
 
-Example:
+Examples:
 
 ```bash
 PI_PROMPT_INTERCEPT_TIMEOUT_MS=0 pi -e ./src/index.ts
+PI_PROMPT_INTERCEPT=0 pi -e ./src/index.ts
+PI_PROMPT_INTERCEPT_ONCE=1 pi -e ./src/index.ts
+```
+
+## Pi Commands
+
+When loaded in interactive pi, the extension registers:
+
+```text
+/prompt-intercept-on
+/prompt-intercept-off
+/prompt-intercept-once
+/prompt-intercept-status
 ```
 
 ## Security Notes

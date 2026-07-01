@@ -23,6 +23,7 @@ type PendingRequest = {
 
 type RuntimeState = {
   enabled: boolean;
+  interceptOnce: boolean;
   port: number;
   host: string;
   timeoutMs: number;
@@ -33,6 +34,7 @@ type RuntimeState = {
 
 const state: RuntimeState = {
   enabled: process.env.PI_PROMPT_INTERCEPT !== "0",
+  interceptOnce: process.env.PI_PROMPT_INTERCEPT_ONCE === "1",
   port: readIntEnv("PI_PROMPT_INTERCEPT_PORT", 47831),
   host: process.env.PI_PROMPT_INTERCEPT_HOST || "127.0.0.1",
   timeoutMs: readIntEnv("PI_PROMPT_INTERCEPT_TIMEOUT_MS", 10 * 60 * 1000),
@@ -44,6 +46,22 @@ function readIntEnv(name: string, fallback: number): number {
   if (!raw) return fallback;
   const value = Number.parseInt(raw, 10);
   return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function modeLabel(): "on" | "off" | "once" {
+  if (!state.enabled) return "off";
+  return state.interceptOnce ? "once" : "on";
+}
+
+function setMode(mode: "on" | "off" | "once") {
+  state.enabled = mode !== "off";
+  state.interceptOnce = mode === "once";
+}
+
+function finishOnceMode() {
+  if (!state.interceptOnce) return;
+  state.enabled = false;
+  state.interceptOnce = false;
 }
 
 function metadataFor(req: PendingRequest) {
@@ -119,6 +137,8 @@ async function route(req: IncomingMessage, res: ServerResponse) {
   if (req.method === "GET" && url.pathname === "/api/state") {
     sendJson(res, 200, {
       enabled: state.enabled,
+      interceptOnce: state.interceptOnce,
+      mode: modeLabel(),
       serverUrl: state.serverUrl,
       pending: [...state.requests.values()].filter((r) => r.status === "pending").map(metadataFor),
       recent: [...state.requests.values()].slice(-50).reverse().map(metadataFor),
@@ -127,9 +147,13 @@ async function route(req: IncomingMessage, res: ServerResponse) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/enabled") {
-    const body = (await readJsonBody(req)) as { enabled?: unknown } | undefined;
-    state.enabled = body?.enabled !== false;
-    sendJson(res, 200, { enabled: state.enabled });
+    const body = (await readJsonBody(req)) as { enabled?: unknown; mode?: unknown } | undefined;
+    if (body?.mode === "on" || body?.mode === "off" || body?.mode === "once") {
+      setMode(body.mode);
+    } else {
+      setMode(body?.enabled === false ? "off" : "on");
+    }
+    sendJson(res, 200, { enabled: state.enabled, interceptOnce: state.interceptOnce, mode: modeLabel() });
     return;
   }
 
@@ -303,7 +327,7 @@ footer { border-top: 1px solid var(--line); padding: 10px 16px; background: var(
 <body>
 <aside>
   <div class="brand"><h1>pi-prompt-intercept</h1><div class="status-line" id="enabled"></div><div class="status-line">Local intercept UI for pi provider payloads.</div></div>
-  <div class="controls"><button id="toggle"></button><button id="refresh">Refresh</button></div>
+  <div class="controls"><button id="toggle"></button><button id="once">Intercept Once</button><button id="refresh">Refresh</button></div>
   <div id="list"></div>
 </aside>
 <main>
@@ -345,6 +369,7 @@ const subtitle = document.getElementById('subtitle');
 const message = document.getElementById('message');
 const enabled = document.getElementById('enabled');
 const toggle = document.getElementById('toggle');
+const once = document.getElementById('once');
 const refreshBtn = document.getElementById('refresh');
 const forward = document.getElementById('forward');
 const forwardEdited = document.getElementById('forwardEdited');
@@ -516,9 +541,10 @@ function renderList() {
 }
 async function refresh() {
   state = await api('/api/state');
-  enabled.textContent = state.enabled ? 'Intercept enabled' : 'Intercept disabled';
+  enabled.textContent = 'Mode: ' + (state.mode || (state.enabled ? 'on' : 'off'));
   enabled.className = 'status-line ' + (state.enabled ? 'good' : 'bad');
   toggle.textContent = state.enabled ? 'Disable' : 'Enable';
+  once.disabled = state.mode === 'once';
   renderList();
   if (!currentId && state.pending?.[0]) select(state.pending[0].id);
 }
@@ -547,7 +573,8 @@ forwardEdited.onclick = async () => { try { await postDecision('/forward', { edi
 reset.onclick = () => { if (currentPayload !== null) editor.value = stringify(currentPayload); };
 drop.onclick = () => postDecision('/drop', { reason: 'Dropped in pi-prompt-intercept UI' });
 copy.onclick = async () => { await navigator.clipboard.writeText(editor.value); say('copied', 'good'); };
-toggle.onclick = async () => { await api('/api/enabled', { method: 'POST', body: JSON.stringify({ enabled: !state.enabled }) }); await refresh(); };
+toggle.onclick = async () => { await api('/api/enabled', { method: 'POST', body: JSON.stringify({ mode: state.enabled ? 'off' : 'on' }) }); await refresh(); };
+once.onclick = async () => { await api('/api/enabled', { method: 'POST', body: JSON.stringify({ mode: 'once' }) }); await refresh(); };
 refreshBtn.onclick = () => refresh().catch(e => say(e.message, 'bad'));
 window.addEventListener('hashchange', () => { if (location.hash) select(location.hash.slice(1)); });
 setInterval(refresh, 1000);
@@ -558,6 +585,38 @@ refresh().catch(e => say(e.message, 'bad'));
 }
 
 export default function promptIntercept(pi: ExtensionAPI) {
+  pi.registerCommand("prompt-intercept-on", {
+    description: "Enable provider payload interception for every request",
+    handler: async (_args, ctx) => {
+      setMode("on");
+      ctx.ui.notify("Prompt intercept mode: on", "info");
+    },
+  });
+
+  pi.registerCommand("prompt-intercept-off", {
+    description: "Disable provider payload interception",
+    handler: async (_args, ctx) => {
+      setMode("off");
+      ctx.ui.notify("Prompt intercept mode: off", "info");
+    },
+  });
+
+  pi.registerCommand("prompt-intercept-once", {
+    description: "Intercept only the next provider request, then disable interception",
+    handler: async (_args, ctx) => {
+      setMode("once");
+      ctx.ui.notify("Prompt intercept mode: once", "info");
+    },
+  });
+
+  pi.registerCommand("prompt-intercept-status", {
+    description: "Show prompt intercept mode and local UI URL",
+    handler: async (_args, ctx) => {
+      const serverUrl = state.serverUrl ?? await ensureServer(ctx);
+      ctx.ui.notify(`Prompt intercept mode: ${modeLabel()} (${serverUrl})`, "info");
+    },
+  });
+
   pi.on("before_provider_request", async (event, ctx) => {
     if (!state.enabled) return;
 
@@ -566,21 +625,25 @@ export default function promptIntercept(pi: ExtensionAPI) {
 
     if (decision.action === "forward") {
       writeAudit(ctx, { event: "forwarded", action: decision.action });
+      finishOnceMode();
       return;
     }
 
     if (decision.action === "forward-edited") {
       writeAudit(ctx, { event: "forwarded-edited", action: decision.action });
+      finishOnceMode();
       return decision.payload;
     }
 
     if (decision.action === "timeout") {
       writeAudit(ctx, { event: "timeout", action: "forward", serverUrl });
       ctx.ui.notify("Prompt intercept timed out; forwarding original payload", "warning");
+      finishOnceMode();
       return;
     }
 
     writeAudit(ctx, { event: "dropped", reason: decision.reason });
+    finishOnceMode();
     throw new Error(decision.reason || "Provider request dropped by pi-prompt-intercept");
   });
 
