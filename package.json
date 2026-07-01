@@ -1,0 +1,28 @@
+{
+  "name": "pi-prompt-intercept",
+  "version": "0.1.0",
+  "description": "Burp-style prompt/payload interceptor for pi provider requests.",
+  "type": "module",
+  "main": "src/index.ts",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "prompt",
+    "intercept",
+    "llm"
+  ],
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.3",
+    "@types/node": "^26.0.1",
+    "typescript": "^5.8.0"
+  }
+}
