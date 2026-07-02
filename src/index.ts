@@ -28,6 +28,7 @@ type RuntimeState = {
   host: string;
   timeoutMs: number;
   startedAt: number;
+  ownerCwd?: string;
   providerRequestCount: number;
   lastProviderRequestAt?: number;
   server?: Server;
@@ -36,8 +37,8 @@ type RuntimeState = {
 };
 
 const state: RuntimeState = {
-  enabled: process.env.PI_PROMPT_INTERCEPT !== "0",
-  interceptOnce: process.env.PI_PROMPT_INTERCEPT_ONCE === "1",
+  enabled: false,
+  interceptOnce: false,
   port: readIntEnv("PI_PROMPT_INTERCEPT_PORT", 47831),
   host: process.env.PI_PROMPT_INTERCEPT_HOST || "127.0.0.1",
   timeoutMs: readIntEnv("PI_PROMPT_INTERCEPT_TIMEOUT_MS", 10 * 60 * 1000),
@@ -56,6 +57,13 @@ function readIntEnv(name: string, fallback: number): number {
 function modeLabel(): "on" | "off" | "once" {
   if (!state.enabled) return "off";
   return state.interceptOnce ? "once" : "on";
+}
+
+function modeDescription(): string {
+  const mode = modeLabel();
+  if (mode === "off") return "pass-through capture";
+  if (mode === "once") return "intercept once";
+  return "intercept";
 }
 
 function setMode(mode: "on" | "off" | "once") {
@@ -141,11 +149,15 @@ async function route(req: IncomingMessage, res: ServerResponse) {
 
   if (req.method === "GET" && url.pathname === "/api/state") {
     sendJson(res, 200, {
+      active: Boolean(state.serverUrl),
       enabled: state.enabled,
       interceptOnce: state.interceptOnce,
       mode: modeLabel(),
+      modeDescription: modeDescription(),
       serverUrl: state.serverUrl,
       startedAt: state.startedAt,
+      ownerPid: process.pid,
+      ownerCwd: state.ownerCwd,
       providerRequestCount: state.providerRequestCount,
       lastProviderRequestAt: state.lastProviderRequestAt,
       pending: [...state.requests.values()].filter((r) => r.status === "pending").map(metadataFor),
@@ -213,12 +225,44 @@ async function ensureServer(ctx: ExtensionContext): Promise<string> {
       const address = server.address();
       const port = typeof address === "object" && address ? address.port : state.port;
       state.serverUrl = `http://${state.host}:${port}`;
+      state.startedAt = Date.now();
+      state.ownerCwd = ctx.cwd;
+      state.providerRequestCount = 0;
+      state.lastProviderRequestAt = undefined;
+      state.requests.clear();
       ctx.ui.notify(`Prompt intercept listening on ${state.serverUrl}`, "info");
       resolve();
     });
   });
 
   return state.serverUrl!;
+}
+
+async function closeServer(ctx: ExtensionContext, reason = "Prompt intercept stopped") {
+  for (const req of state.requests.values()) {
+    if (req.status === "pending") settle(req.id, { action: "drop", reason });
+  }
+  if (state.server) {
+    await new Promise<void>((resolve) => state.server?.close(() => resolve()));
+  }
+  state.server = undefined;
+  state.serverUrl = undefined;
+  state.ownerCwd = undefined;
+  state.enabled = false;
+  state.interceptOnce = false;
+  ctx.ui.setStatus("prompt-intercept", undefined);
+}
+
+async function openServer(ctx: ExtensionContext): Promise<string> {
+  try {
+    const serverUrl = await ensureServer(ctx);
+    setMode("off");
+    ctx.ui.setStatus("prompt-intercept", `prompt-intercept: ${modeDescription()} ${serverUrl}`);
+    return serverUrl;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Prompt intercept could not start on ${state.host}:${state.port}. Another pi process may already have it enabled. ${message}`);
+  }
 }
 
 function modelFor(ctx: ExtensionContext) {
@@ -351,7 +395,7 @@ footer { border-top: 1px solid var(--line); padding: 10px 16px; background: var(
 </head>
 <body>
 <aside>
-  <div class="brand"><h1>pi-prompt-intercept</h1><div class="status-line" id="enabled"></div><div class="status-line" id="diagnostics">Local intercept UI for pi provider payloads.</div></div>
+  <div class="brand"><h1>pi-prompt-intercept</h1><div class="status-line" id="enabled"></div><div class="status-line" id="diagnostics">Local inspector UI for pi provider payloads.</div></div>
   <div class="controls"><button id="toggle"></button><button id="once">Intercept Once</button><button id="refresh">Refresh</button></div>
   <div id="list"></div>
 </aside>
@@ -561,7 +605,7 @@ function renderList() {
   const items = [...(state?.pending || []), ...(state?.recent || []).filter(r => !(state?.pending || []).some(p => p.id === r.id))];
   listEl.innerHTML = '';
   if (!items.length) {
-    listEl.innerHTML = '<div class="empty">No provider requests captured yet.<br><br>Check that pi was started with this extension loaded, then send a prompt that reaches the model. If installed as a package after a git push, run pi update or reload the extension.</div>';
+    listEl.innerHTML = '<div class="empty">No provider requests captured yet.<br><br>Send a prompt that reaches the model while this inspector is open.</div>';
     return;
   }
   for (const item of items) {
@@ -574,10 +618,10 @@ function renderList() {
 }
 async function refresh() {
   state = await api('/api/state');
-  enabled.textContent = 'Mode: ' + (state.mode || (state.enabled ? 'on' : 'off'));
-  enabled.className = 'status-line ' + (state.enabled ? 'good' : 'bad');
-  diagnostics.textContent = 'Requests seen: ' + (state.providerRequestCount || 0) + ' / started ' + (state.startedAt ? new Date(state.startedAt).toLocaleTimeString() : 'unknown') + (state.lastProviderRequestAt ? ' / last ' + new Date(state.lastProviderRequestAt).toLocaleTimeString() : '');
-  toggle.textContent = state.enabled ? 'Disable' : 'Enable';
+  enabled.textContent = 'Mode: ' + (state.modeDescription || (state.enabled ? 'intercept' : 'pass-through capture'));
+  enabled.className = 'status-line ' + (state.enabled ? 'good' : '');
+  diagnostics.textContent = 'Requests seen: ' + (state.providerRequestCount || 0) + ' / pid ' + (state.ownerPid || 'unknown') + ' / opened ' + (state.startedAt ? new Date(state.startedAt).toLocaleTimeString() : 'unknown') + (state.lastProviderRequestAt ? ' / last ' + new Date(state.lastProviderRequestAt).toLocaleTimeString() : '');
+  toggle.textContent = state.enabled ? 'Pass Through' : 'Intercept';
   once.disabled = state.mode === 'once';
   renderList();
   const items = [...(state?.pending || []), ...(state?.recent || []).filter(r => !(state?.pending || []).some(p => p.id === r.id))];
@@ -641,52 +685,82 @@ refresh().catch(e => say(e.message, 'bad'));
 }
 
 export default function promptIntercept(pi: ExtensionAPI) {
-  pi.registerCommand("prompt-intercept-on", {
-    description: "Enable provider payload interception for every request",
-    handler: async (_args, ctx) => {
-      setMode("on");
-      ctx.ui.notify("Prompt intercept mode: on", "info");
+  pi.registerCommand("prompt-intercept", {
+    description: "Open and control the provider payload inspector",
+    getArgumentCompletions: (prefix) => {
+      const commands = ["open", "close", "status", "on", "off", "once", "help"];
+      const filtered = commands.filter((command) => command.startsWith(prefix.trim()));
+      return filtered.length ? filtered.map((command) => ({ value: command, label: command })) : null;
     },
-  });
+    handler: async (args, ctx) => {
+      const command = args.trim().split(/\s+/, 1)[0] || "open";
 
-  pi.registerCommand("prompt-intercept-off", {
-    description: "Disable provider payload interception",
-    handler: async (_args, ctx) => {
-      setMode("off");
-      ctx.ui.notify("Prompt intercept mode: off", "info");
+      try {
+        if (command === "open" || command === "start") {
+          const serverUrl = await openServer(ctx);
+          ctx.ui.notify(`Prompt intercept open in pass-through capture mode: ${serverUrl}`, "info");
+          return;
+        }
+
+        if (command === "close" || command === "stop") {
+          if (!state.serverUrl) {
+            ctx.ui.notify("Prompt intercept is not open", "info");
+            return;
+          }
+          await closeServer(ctx);
+          ctx.ui.notify("Prompt intercept closed", "info");
+          return;
+        }
+
+        if (command === "on") {
+          const serverUrl = state.serverUrl ?? await openServer(ctx);
+          setMode("on");
+          ctx.ui.setStatus("prompt-intercept", `prompt-intercept: ${modeDescription()} ${serverUrl}`);
+          ctx.ui.notify(`Prompt intercept mode: on (${serverUrl})`, "info");
+          return;
+        }
+
+        if (command === "off") {
+          if (!state.serverUrl) {
+            ctx.ui.notify("Prompt intercept is not open", "info");
+            return;
+          }
+          setMode("off");
+          ctx.ui.setStatus("prompt-intercept", `prompt-intercept: ${modeDescription()} ${state.serverUrl}`);
+          ctx.ui.notify(`Prompt intercept mode: pass-through capture (${state.serverUrl})`, "info");
+          return;
+        }
+
+        if (command === "once") {
+          const serverUrl = state.serverUrl ?? await openServer(ctx);
+          setMode("once");
+          ctx.ui.setStatus("prompt-intercept", `prompt-intercept: ${modeDescription()} ${serverUrl}`);
+          ctx.ui.notify(`Prompt intercept mode: once (${serverUrl})`, "info");
+          return;
+        }
+
+        if (command === "status") {
+          if (!state.serverUrl) {
+            ctx.ui.notify("Prompt intercept is closed. Run /prompt-intercept open to start pass-through capture.", "info");
+            return;
+          }
+          ctx.ui.notify(`Prompt intercept: ${modeDescription()} (${state.serverUrl}, pid ${process.pid})`, "info");
+          return;
+        }
+
+        ctx.ui.notify("Usage: /prompt-intercept [open|close|status|on|off|once]", "info");
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+      }
     },
-  });
-
-  pi.registerCommand("prompt-intercept-once", {
-    description: "Intercept only the next provider request, then disable interception",
-    handler: async (_args, ctx) => {
-      setMode("once");
-      ctx.ui.notify("Prompt intercept mode: once", "info");
-    },
-  });
-
-  pi.registerCommand("prompt-intercept-status", {
-    description: "Show prompt intercept mode and local UI URL",
-    handler: async (_args, ctx) => {
-      const serverUrl = state.serverUrl ?? await ensureServer(ctx);
-      ctx.ui.notify(`Prompt intercept mode: ${modeLabel()} (${serverUrl})`, "info");
-    },
-  });
-
-  pi.on("session_start", async (_event, ctx) => {
-    try {
-      const serverUrl = await ensureServer(ctx);
-      ctx.ui.setStatus("prompt-intercept", `intercept: ${modeLabel()} ${serverUrl}`);
-    } catch (error) {
-      ctx.ui.notify(`Prompt intercept failed to start: ${error instanceof Error ? error.message : String(error)}`, "error");
-    }
   });
 
   pi.on("before_provider_request", async (event, ctx) => {
+    const serverUrl = state.serverUrl;
+    if (!serverUrl) return;
+
     state.providerRequestCount += 1;
     state.lastProviderRequestAt = Date.now();
-
-    const serverUrl = await ensureServer(ctx);
 
     if (!state.enabled) {
       const request = recordBypassed(ctx, event.payload);
@@ -721,14 +795,6 @@ export default function promptIntercept(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
-    for (const req of state.requests.values()) {
-      if (req.status === "pending") settle(req.id, { action: "drop", reason: "Session shutting down" });
-    }
-    if (state.server) {
-      await new Promise<void>((resolve) => state.server?.close(() => resolve()));
-      state.server = undefined;
-      state.serverUrl = undefined;
-    }
-    ctx.ui.setStatus("prompt-intercept", undefined);
+    await closeServer(ctx, "Session shutting down");
   });
 }
