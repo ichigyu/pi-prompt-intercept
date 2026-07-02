@@ -9,9 +9,9 @@ This is a research/debugging tool for understanding what your agent is about to 
 - Hooks pi's `before_provider_request` extension event.
 - Starts a local web UI at `http://127.0.0.1:47831`.
 - Queues each provider request as `pending`.
-- Renders provider payloads in human-readable tabs: Overview, System, Messages, Tools, Raw/Edit, and JSON Tree.
+- Renders provider payloads in human-readable tabs: Overview, System, Messages, Tools, Edit JSON, and JSON Tree.
 - Lets you inspect, edit, forward, or drop the payload.
-- Supports `on`, `off`, and `once` modes so you can intercept every request, no requests, or only the next request.
+- Supports `on`, `off`, and `once` modes so you can block every request, pass through while recording, or intercept only the next request.
 - Writes minimal audit events to `.pi/prompt-intercept/events.jsonl`.
 
 It does not proxy arbitrary network traffic. It only intercepts provider payloads inside pi's extension lifecycle.
@@ -48,15 +48,15 @@ http://127.0.0.1:47831
 - **System**: extracted system/developer/instructions text.
 - **Messages**: normalized conversation messages and tool call/result blocks.
 - **Tools**: tool schemas with names, descriptions, and parameters.
-- **Raw / Edit**: editable raw JSON payload.
-- **JSON Tree**: structured payload tree.
+- **Edit JSON**: editable raw JSON payload used by Forward Edited.
+- **JSON Tree**: read-only structured payload tree for inspection.
 
 5. Choose one action:
 
 - **Forward**: send the original provider payload.
 - **Forward Edited**: parse the editor JSON and send the edited payload.
 - **Drop**: abort the provider request.
-- **Disable**: stop intercepting new requests for this session.
+- **Disable**: stop blocking new requests for this session. Requests are still recorded as bypassed for inspection.
 - **Intercept Once**: intercept only the next provider request, then automatically switch back to off.
 
 ## Environment Variables

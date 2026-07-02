@@ -16,8 +16,8 @@ type PendingRequest = {
   cwd: string;
   model?: unknown;
   payload: unknown;
-  status: "pending" | "forwarded" | "forwarded-edited" | "dropped" | "timeout";
-  resolve: (decision: Decision) => void;
+  status: "pending" | "forwarded" | "forwarded-edited" | "dropped" | "timeout" | "bypassed";
+  resolve?: (decision: Decision) => void;
   timeout?: NodeJS.Timeout;
 };
 
@@ -121,7 +121,7 @@ function sendText(res: ServerResponse, status: number, text: string, contentType
 
 function settle(id: string, decision: Decision): boolean {
   const req = state.requests.get(id);
-  if (!req || req.status !== "pending") return false;
+  if (!req || req.status !== "pending" || !req.resolve) return false;
   if (req.timeout) clearTimeout(req.timeout);
   if (decision.action === "forward") req.status = "forwarded";
   if (decision.action === "forward-edited") req.status = "forwarded-edited";
@@ -221,16 +221,32 @@ async function ensureServer(ctx: ExtensionContext): Promise<string> {
   return state.serverUrl!;
 }
 
+function modelFor(ctx: ExtensionContext) {
+  return ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
+}
+
+function recordBypassed(ctx: ExtensionContext, payload: unknown): PendingRequest {
+  const request: PendingRequest = {
+    id: randomUUID(),
+    createdAt: Date.now(),
+    cwd: ctx.cwd,
+    model: modelFor(ctx),
+    payload,
+    status: "bypassed",
+  };
+  state.requests.set(request.id, request);
+  return request;
+}
+
 function intercept(ctx: ExtensionContext, payload: unknown): Promise<Decision> {
   const id = randomUUID();
-  const model = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
 
   return new Promise<Decision>((resolve) => {
     const request: PendingRequest = {
       id,
       createdAt: Date.now(),
       cwd: ctx.cwd,
-      model,
+      model: modelFor(ctx),
       payload,
       status: "pending",
       resolve,
@@ -280,16 +296,17 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 700; border: 1px solid var(--line); color: var(--muted); }
 .badge.pending { color: var(--blue); border-color: var(--blue); }
 .badge.dropped { color: var(--red); border-color: var(--red); }
+.badge.bypassed { color: var(--green); border-color: var(--green); }
 .item-id { font-family: var(--mono); font-size: 12px; color: var(--text); }
 .meta { color: var(--muted); font-size: 11px; margin-top: 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-main { min-width: 0; display: grid; grid-template-rows: auto auto 1fr auto; }
+main { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; }
 .top { background: var(--panel); border-bottom: 1px solid var(--line); padding: 12px 16px; min-width: 0; }
 #title { font-family: var(--mono); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #subtitle { color: var(--muted); font-size: 12px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tabs { display: flex; gap: 4px; padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--line); overflow-x: auto; }
 .tab { min-height: 30px; padding: 5px 10px; border-radius: 6px; border: 1px solid transparent; color: var(--muted); background: transparent; font-size: 12px; }
 .tab.active { color: var(--blue); border-color: var(--blue); background: color-mix(in srgb, var(--blue) 12%, transparent); }
-#detail { overflow: auto; padding: 14px 16px; }
+#detail { min-height: 0; overflow: auto; padding: 14px 16px; }
 .panel { display: none; }
 .panel.active { display: block; }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px; }
@@ -326,10 +343,10 @@ main { min-width: 0; display: grid; grid-template-rows: auto auto 1fr auto; }
 footer { border-top: 1px solid var(--line); padding: 10px 16px; background: var(--panel); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 #message { color: var(--muted); font-size: 12px; }
 .good { color: var(--green) !important; } .bad { color: var(--red) !important; }
-.json-tree { font-family: var(--mono); font-size: 12px; line-height: 1.55; }
+.json-tree { font-family: var(--mono); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
 .jline { margin-left: 16px; }
 .jkey { color: var(--purple); } .jstr { color: var(--green); } .jnum { color: var(--amber); } .jbool { color: var(--red); } .jnull { color: var(--muted); }
-@media (max-width: 880px) { body { grid-template-columns: 1fr; grid-template-rows: 260px 1fr; } aside { border-right: 0; border-bottom: 1px solid var(--line); } }
+@media (max-width: 880px) { body { grid-template-columns: 1fr; grid-template-rows: 260px minmax(0, 1fr); } aside { border-right: 0; border-bottom: 1px solid var(--line); min-height: 0; } }
 </style>
 </head>
 <body>
@@ -345,7 +362,7 @@ footer { border-top: 1px solid var(--line); padding: 10px 16px; background: var(
     <button class="tab" data-tab="system">System</button>
     <button class="tab" data-tab="messages">Messages</button>
     <button class="tab" data-tab="tools">Tools</button>
-    <button class="tab" data-tab="raw">Raw / Edit</button>
+    <button class="tab" data-tab="raw">Edit JSON</button>
     <button class="tab" data-tab="tree">JSON Tree</button>
   </div>
   <div id="detail">
@@ -359,9 +376,9 @@ footer { border-top: 1px solid var(--line); padding: 10px 16px; background: var(
   <footer>
     <button class="primary" id="forward">Forward</button>
     <button id="forwardEdited">Forward Edited</button>
-    <button id="reset">Reset Raw</button>
+    <button id="reset">Reset Edit</button>
     <button class="danger" id="drop">Drop</button>
-    <button id="copy">Copy Raw</button>
+    <button id="copy">Copy JSON</button>
     <span id="message"></span>
   </footer>
 </main>
@@ -401,7 +418,7 @@ function textFromContent(content) {
     if (typeof part.text === 'string') return part.text;
     if (typeof part.input_text === 'string') return part.input_text;
     return stringify(part);
-  }).filter(Boolean).join('\n');
+  }).filter(Boolean).join('\\n');
   return stringify(content);
 }
 function blocksFromContent(content) {
@@ -412,7 +429,7 @@ function blocksFromContent(content) {
 }
 function isInstructionRole(role) { return role === 'system' || role === 'developer'; }
 function geminiRequest(body) { if (body && typeof body === 'object' && body.request && (Array.isArray(body.request.contents) || body.request.systemInstruction)) return body.request; return body || {}; }
-function geminiText(parts) { return Array.isArray(parts) ? parts.map(p => p && typeof p.text === 'string' ? p.text : '').filter(Boolean).join('\n') : ''; }
+function geminiText(parts) { return Array.isArray(parts) ? parts.map(p => p && typeof p.text === 'string' ? p.text : '').filter(Boolean).join('\\n') : ''; }
 function extractSystem(body) {
   const parts = [];
   if (!body || typeof body !== 'object') return '';
@@ -422,9 +439,12 @@ function extractSystem(body) {
   if (Array.isArray(body.messages)) {
     for (const m of body.messages) if (m && isInstructionRole(m.role)) parts.push(textFromContent(m.content));
   }
+  if (Array.isArray(body.input)) {
+    for (const item of body.input) if (item && typeof item === 'object' && isInstructionRole(item.role)) parts.push(textFromContent(item.content));
+  }
   const g = geminiRequest(body);
   if (g.systemInstruction) parts.push(geminiText(g.systemInstruction.parts));
-  return parts.filter(s => String(s).trim()).join('\n\n');
+  return parts.filter(s => String(s).trim()).join('\\n\\n');
 }
 function normalizeToolCall(call) {
   const fn = call && call.function ? call.function : {};
@@ -460,7 +480,7 @@ function extractMessages(body) {
   if (Array.isArray(body.messages)) return body.messages.map(normalizeMessage).filter(Boolean);
   if (Array.isArray(geminiRequest(body).contents)) return geminiMessages(body);
   if (Array.isArray(body.input)) {
-    return body.input.filter(i => i && typeof i === 'object' && i.role).map(i => ({ role: i.role, content: blocksFromContent(i.content || i) }));
+    return body.input.filter(i => i && typeof i === 'object' && i.role && !isInstructionRole(i.role)).map(i => ({ role: i.role, content: blocksFromContent(i.content || i) }));
   }
   return [];
 }
@@ -503,7 +523,7 @@ function renderTools(tools) {
     const props = schema.properties || {};
     const required = new Set(schema.required || []);
     const params = Object.keys(props).map(k => '<div class="param"><span class="param-name">' + esc(k) + '</span><span class="param-type">' + esc(props[k].type || (props[k].enum ? 'enum' : '')) + '</span>' + (required.has(k) ? '<span class="badge">required</span>' : '') + '<div>' + esc(props[k].description || '') + '</div></div>').join('');
-    return '<div class="tool"><div class="tool-head"><span class="tool-name">' + esc(toolName(tool)) + '</span><span class="tool-desc">' + esc(toolDesc(tool).split('\n')[0]) + '</span></div><div class="tool-body">' + (toolDesc(tool) ? '<div class="pre">' + esc(toolDesc(tool)) + '</div>' : '') + (params || '<pre>' + esc(stringify(schema)) + '</pre>') + '</div></div>';
+    return '<div class="tool"><div class="tool-head"><span class="tool-name">' + esc(toolName(tool)) + '</span><span class="tool-desc">' + esc(toolDesc(tool).split('\\n')[0]) + '</span></div><div class="tool-body">' + (toolDesc(tool) ? '<div class="pre">' + esc(toolDesc(tool)) + '</div>' : '') + (params || '<pre>' + esc(stringify(schema)) + '</pre>') + '</div></div>';
   }).join('');
 }
 function jsonTree(value) {
@@ -530,8 +550,8 @@ function renderReadable(req) {
     + '<div class="card"><div class="label">messages</div><div class="value">' + messages.length + '</div></div>'
     + '<div class="card"><div class="label">tools</div><div class="value">' + tools.length + '</div></div>'
     + '<div class="card"><div class="label">approx tokens</div><div class="value">' + Math.ceil(raw.length / 4).toLocaleString() + '</div></div>'
-    + '</div><div class="section"><h2>Request Parameters</h2><div class="section-body">' + (params.length ? '<pre>' + esc(params.map(([k,v]) => k + ': ' + stringify(v)).join('\n')) + '</pre>' : '<div class="empty">No scalar request parameters found.</div>') + '</div></div>'
-    + '<div class="section"><h2>System Preview <span class="badge">' + system.length.toLocaleString() + ' chars</span></h2><div class="section-body"><div class="pre">' + esc(system.slice(0, 5000) || 'No system prompt found.') + (system.length > 5000 ? '\n\n... truncated in overview; open System tab for full text.' : '') + '</div></div></div>';
+    + '</div><div class="section"><h2>Request Parameters</h2><div class="section-body">' + (params.length ? '<pre>' + esc(params.map(([k,v]) => k + ': ' + stringify(v)).join('\\n')) + '</pre>' : '<div class="empty">No scalar request parameters found.</div>') + '</div></div>'
+    + '<div class="section"><h2>System Preview <span class="badge">' + system.length.toLocaleString() + ' chars</span></h2><div class="section-body"><div class="pre">' + esc(system.slice(0, 5000) || 'No system prompt found.') + (system.length > 5000 ? '\\n\\n... truncated in overview; open System tab for full text.' : '') + '</div></div></div>';
   document.getElementById('system').innerHTML = '<div class="section"><h2>System Prompt <span class="badge">' + system.length.toLocaleString() + ' chars</span></h2><div class="section-body"><div class="pre">' + esc(system || 'No system prompt found.') + '</div></div></div>';
   document.getElementById('messages').innerHTML = renderMessages(messages);
   document.getElementById('tools').innerHTML = renderTools(tools);
@@ -560,7 +580,27 @@ async function refresh() {
   toggle.textContent = state.enabled ? 'Disable' : 'Enable';
   once.disabled = state.mode === 'once';
   renderList();
-  if (!currentId && state.pending?.[0]) select(state.pending[0].id);
+  const items = [...(state?.pending || []), ...(state?.recent || []).filter(r => !(state?.pending || []).some(p => p.id === r.id))];
+  const currentSummary = items.find(item => item.id === currentId);
+  if (currentRequest && currentSummary) {
+    currentRequest.status = currentSummary.status;
+    subtitle.textContent = currentRequest.status + ' / ' + new Date(currentRequest.createdAt).toLocaleString() + ' / ' + currentRequest.cwd;
+  }
+  updateActions();
+  if (currentId && !currentRequest && items.some(item => item.id === currentId)) {
+    select(currentId);
+  } else if ((!currentId || !items.some(item => item.id === currentId)) && state.pending?.[0]) {
+    select(state.pending[0].id);
+  }
+}
+function updateActions() {
+  const hasRequest = !!currentRequest;
+  const canDecide = currentRequest?.status === 'pending';
+  forward.disabled = !canDecide;
+  forwardEdited.disabled = !canDecide;
+  drop.disabled = !canDecide;
+  reset.disabled = !hasRequest;
+  copy.disabled = !hasRequest;
 }
 async function select(id) {
   currentId = id;
@@ -572,6 +612,7 @@ async function select(id) {
   title.textContent = req.id;
   subtitle.textContent = req.status + ' / ' + new Date(req.createdAt).toLocaleString() + ' / ' + req.cwd;
   renderReadable(req);
+  updateActions();
   say('');
   renderList();
 }
@@ -590,6 +631,7 @@ copy.onclick = async () => { await navigator.clipboard.writeText(editor.value); 
 toggle.onclick = async () => { await api('/api/enabled', { method: 'POST', body: JSON.stringify({ mode: state.enabled ? 'off' : 'on' }) }); await refresh(); };
 once.onclick = async () => { await api('/api/enabled', { method: 'POST', body: JSON.stringify({ mode: 'once' }) }); await refresh(); };
 refreshBtn.onclick = () => refresh().catch(e => say(e.message, 'bad'));
+updateActions();
 window.addEventListener('hashchange', () => { if (location.hash) select(location.hash.slice(1)); });
 setInterval(refresh, 1000);
 refresh().catch(e => say(e.message, 'bad'));
@@ -644,9 +686,14 @@ export default function promptIntercept(pi: ExtensionAPI) {
     state.providerRequestCount += 1;
     state.lastProviderRequestAt = Date.now();
 
-    if (!state.enabled) return;
-
     const serverUrl = await ensureServer(ctx);
+
+    if (!state.enabled) {
+      const request = recordBypassed(ctx, event.payload);
+      writeAudit(ctx, { event: "bypassed", request: metadataFor(request), url: `${serverUrl}/#${request.id}` });
+      return;
+    }
+
     const decision = await intercept(ctx, event.payload);
 
     if (decision.action === "forward") {
